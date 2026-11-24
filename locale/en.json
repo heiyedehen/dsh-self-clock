@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Heartbeat",
+    "description": "A clock the model sets for itself: it wakes up in the same conversation and leaves a one-line notice. Switch, interval, time window, daily budget and a temporary mute."
+  }
+}

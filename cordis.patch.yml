@@ -1,0 +1,9 @@
+- insert:
+    - id: dsh-self-clock
+      name: dsh-self-clock
+      config:
+        windowStart: 0
+        windowEnd: 23
+        dailyBudget: 48
+        chatGraceMinutes: 5
+        postReplyGraceMinutes: 2
