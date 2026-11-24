@@ -1,6 +1,6 @@
 {
   "name": "dsh-self-clock",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "private": false,
   "author": "鹿野 <luye@dsh.local>",
   "license": "MIT",
@@ -10,6 +10,7 @@
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
+    "./icon": "./icon.svg",
     "./locale/*.json": "./locale/*.json"
   },
   "files": [
@@ -19,6 +20,8 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
+    "assets/screenshot-1.png",
+    "screenshots.json",
     "README.md"
   ],
   "dsh": {
