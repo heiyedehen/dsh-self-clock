@@ -1,9 +1,14 @@
 {
   "name": "dsh-self-clock",
-  "version": "0.3.11",
+  "version": "0.3.14",
   "private": false,
   "author": "鹿野 <luye@dsh.local>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/heiyedehen/dsh-self-clock.git"
+  },
+  "homepage": "https://github.com/heiyedehen/dsh-self-clock",
   "description": "自己的闹钟：模型自己设时间，到点在同一个会话里注一条 notice；带总开关/频次/时段/每日上限/临时静音，还会判断他这会儿在不在说话。",
   "type": "module",
   "main": "index.js",
@@ -47,6 +52,6 @@
     "reminder"
   ],
   "engines": {
-    "dsh": ">=0.2.1-rc.0 <0.4.0-0"
+    "dsh": ">=0.2.3-alpha.0 <0.4.0-0"
   }
 }

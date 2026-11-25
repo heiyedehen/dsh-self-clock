@@ -12,12 +12,48 @@
 import { readFile, writeFile, rename, mkdir, readdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 
 import {
   MINUTE, budgetState, dayKey, hhmm, judgeTiming, nextFire, parseCron, statusOf, windowOf,
 } from './lib/core.js'
 import { preview, readSessionPresence } from './lib/presence.js'
 import { loadCreateUserMessage } from './lib/message.js'
+
+/**
+ * 路由准入（工单-HTTP路由准入，2026-11-26）。
+ *
+ * 宿主契约：register({ auth }) 的 auth 可以是
+ * 'anonymous' | 'required' | 'deny'，或 (request) => policy；
+ * request 里有 { headers, method, url, transport }。
+ *
+ * 规则：请求带 Origin/Referer 且跟 Host 对不上 → 拒；Origin 是 "null"
+ * （沙箱页面 / data: / file:）→ 拒；没带来源（curl、本地脚本、同源导航）
+ * 或来源就是本服务的 Host → 放行。面板在同源 iframe 里跑，功能不变。
+ */
+export function sameSiteAuth(request) {
+  const headers = request?.headers
+  const read = (name) => {
+    if (!headers) return undefined
+    if (typeof headers.get === 'function') return headers.get(name) ?? undefined
+    const value = headers[name] ?? headers[name.toLowerCase()] ?? headers[name.toUpperCase()]
+    return Array.isArray(value) ? value[0] : value
+  }
+  const host = String(read('host') || '')
+  const source = String(read('origin') || read('referer') || '')
+  if (!source) return 'anonymous'
+  if (source === 'null') return 'deny'
+  try {
+    const url = new URL(source)
+    if (host && url.host === host) return 'anonymous'
+    // 同一个本机服务、但 Host 头缺失（HTTP/1.0、某些本地代理）
+    if (!host && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')) return 'anonymous'
+    return 'deny'
+  } catch {
+    return 'deny'
+  }
+}
+
 
 export const name = 'dsh-heartbeat'
 
@@ -51,11 +87,139 @@ const DEFAULTS = {
 const MAX_TIMER = 2 ** 31 - 1
 const DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh')
 const STATE_FILE = join(DSH_HOME, 'heartbeat.json')
+const INTENTS_FILE = join(DSH_HOME, 'intents.json')
+const SELF_DIR = join(DSH_HOME, 'self')
 const SESSIONS_ROOT = join(DSH_HOME, 'sessions')
 const PROJ_DIR = join(DSH_HOME, 'storages', 'session_projcache', 'sessions')
 const LABEL_MAX = 80
 const MIN_EVERY = 5
 const GENTLE_TEXT = '到点了。（他刚说完话没多久，先别起新话题；想说什么就轻轻说一句。）'
+
+/* ------------------------------------------------------------ 意图（intents） */
+/** 同时最多挂着几条 */
+const INTENT_MAX_PENDING = 5
+/** 一天最多被意图唤醒几次——这是刹车，不是配额 */
+const INTENT_MAX_PER_DAY = 4
+/** 过期多久算作废 */
+const INTENT_TTL = 24 * 60 * MINUTE
+
+const TEMPLATE_INTENTS = `# 意图
+
+一行一条：\`- 时间 | 条件 | 想干嘛 | 来源 | 状态\`
+例：\`- 23:30 | 他还在电脑前 | 看一眼，在就别出声 | 他说「今晚可能很晚」 | pending\`
+
+这份是给人看的。真正会叫醒你的是 \`intent_set\`，它写 \`~/.dsh/intents.json\`。
+边界：最多 5 条；过期 24 小时作废；只记「什么时候该看场面」，不记活。
+`
+
+const TEMPLATE_WANTS = `# 我想做的事
+
+一行一条，写想做还没做的。
+例：\`- 把《雪中》读完\`、\`- 学一下怎么给自己做个网页\`
+
+这不是任务清单——没有截止日期，也不用汇报，想删就删。
+`
+
+function intentsPath() {
+  return INTENTS_FILE
+}
+
+function emptyIntents() {
+  return { version: 1, intents: [], usage: { date: '', count: 0 } }
+}
+
+async function loadIntents() {
+  try {
+    const raw = await readFile(intentsPath(), 'utf8')
+    const parsed = JSON.parse(raw)
+    const list = Array.isArray(parsed?.intents) ? parsed.intents : []
+    return {
+      version: parsed?.version ?? 1,
+      intents: list.filter((item) => item && typeof item === 'object'),
+      usage: parsed?.usage && typeof parsed.usage === 'object'
+        ? { date: String(parsed.usage.date ?? ''), count: num(parsed.usage.count, 0) }
+        : { date: '', count: 0 },
+    }
+  } catch {
+    return emptyIntents()
+  }
+}
+
+async function saveIntents(doc) {
+  const payload = {
+    version: doc.version ?? 1,
+    intents: Array.isArray(doc.intents) ? doc.intents : [],
+    usage: doc.usage ?? { date: '', count: 0 },
+  }
+  const file = intentsPath()
+  const tmp = `${file}.${process.pid}.tmp`
+  try {
+    await mkdir(dirname(file), { recursive: true })
+    await writeFile(tmp, JSON.stringify(payload, null, 2), 'utf8')
+    await rename(tmp, file)
+  } catch {}
+}
+
+/**
+ * 首次运行时放两份空模板，让别人的鱼自己往里写。
+ * 硬规矩：文件存在就一个字都不改；写不进去也不能拦住插件启动。
+ */
+async function ensureTemplates(log) {
+  const files = [
+    [join(SELF_DIR, '意图.md'), TEMPLATE_INTENTS],
+    [join(SELF_DIR, '我想做的事.md'), TEMPLATE_WANTS],
+  ]
+  try {
+    await mkdir(SELF_DIR, { recursive: true })
+  } catch (error) {
+    log?.(`模板目录建不了（${error?.message || error}），跳过模板`)
+    return []
+  }
+  const written = []
+  for (const [file, text] of files) {
+    try {
+      await stat(file)
+      continue
+    } catch {}
+    try {
+      await writeFile(file, text, 'utf8')
+      written.push(file)
+    } catch (error) {
+      log?.(`模板写不进去（${file}）：${error?.message || error}`)
+    }
+  }
+  return written
+}
+
+/** 意图时间：只认绝对时刻，写进去就定死，不留表达式 */
+function parseIntentAt(raw, now = Date.now()) {
+  const text = String(raw ?? '').trim()
+  if (!text) return { ok: false, message: '要给时间：ISO、HH:MM 或 +3h。' }
+  const relative = /^\+(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/i.exec(text)
+  if (relative) {
+    const amount = Number(relative[1])
+    const unit = relative[2].toLowerCase()
+    const ms = unit.startsWith('m')
+      ? amount * MINUTE
+      : unit.startsWith('h') ? amount * 60 * MINUTE : amount * 24 * 60 * MINUTE
+    if (!(ms > 0)) return { ok: false, message: '相对时间要大于 0。' }
+    return { ok: true, at: now + ms }
+  }
+  const clock = /^(\d{1,2}):(\d{2})$/.exec(text)
+  if (clock) {
+    const hour = Number(clock[1])
+    const minute = Number(clock[2])
+    if (hour > 23 || minute > 59) return { ok: false, message: `时间不合法：${text}（HH:MM）。` }
+    const day = new Date(now)
+    day.setHours(hour, minute, 0, 0)
+    let at = day.getTime()
+    if (at <= now) at += 24 * 60 * MINUTE
+    return { ok: true, at }
+  }
+  const at = Date.parse(text)
+  if (!Number.isFinite(at)) return { ok: false, message: `认不出这个时间：${text}` }
+  return { ok: true, at }
+}
 
 function statePath() {
   return STATE_FILE
@@ -292,6 +456,17 @@ export function apply(ctx, rawConfig = {}) {
   })
 
   let loadedFromDisk = false
+  let intentsDoc = emptyIntents()
+  let intentsLoaded = false
+
+  async function loadIntentsOnce() {
+    if (intentsLoaded) return
+    // 第一次运行（或者别人刚装上）就落一份空结构，让人能打开看见、也知道该往哪写
+    const existed = await stat(intentsPath()).then(() => true).catch(() => false)
+    intentsDoc = await loadIntents()
+    intentsLoaded = true
+    if (!existed) await saveIntents(intentsDoc)
+  }
   async function bootState() {
     await ready
     if (loadedFromDisk) return
@@ -303,6 +478,15 @@ export function apply(ctx, rawConfig = {}) {
       const normalised = normaliseAlarm(alarm, cfg, now)
       if (JSON.stringify(normalised) !== JSON.stringify(alarm)) changed = true
       state.alarms[key] = normalised
+    }
+    // 预算按会话分桶：搬过会话之后，旧 key 还占着今天的额度，启动时清一次。
+    // 只在启动做（不是每次落盘都做），否则一次性闹钟响完删条目会把刚记下的那一次也抹掉。
+    const bucket = state.usage?.bySession && typeof state.usage.bySession === 'object' ? state.usage.bySession : {}
+    for (const sessionId of Object.keys(bucket)) {
+      if (!state.alarms[sessionId]) {
+        delete bucket[sessionId]
+        changed = true
+      }
     }
     if (changed) await saveState(state)
   }
@@ -387,7 +571,128 @@ export function apply(ctx, rawConfig = {}) {
     })
   }
 
-  /* ------------------------------------------------------------ 定时器 */
+  /* ------------------------------------------------------------ 意图唤醒 */
+
+  function intentUsage(now) {
+    const day = dayKey(now)
+    const usage = intentsDoc.usage ?? { date: '', count: 0 }
+    return { day, used: usage.date === day ? num(usage.count, 0) : 0 }
+  }
+
+  function intentView(item, now) {
+    const at = Date.parse(item.at)
+    return {
+      id: item.id,
+      at: item.at,
+      atLocal: Number.isFinite(at) ? `${dayKey(at)} ${hhmm(at)}` : null,
+      note: item.note || '',
+      status: item.status || 'pending',
+      sessionId: item.sessionId ?? '',
+      createdAt: item.createdAt ?? null,
+      due: Number.isFinite(at) ? at <= now : false,
+    }
+  }
+
+  async function pruneIntents(now) {
+    let changed = false
+    for (const item of intentsDoc.intents ?? []) {
+      if (item.status !== 'pending') continue
+      const at = Date.parse(item.at)
+      if (!Number.isFinite(at) || now - at > INTENT_TTL) {
+        item.status = 'expired'
+        item.closedAt = new Date(now).toISOString()
+        changed = true
+        log(`意图过期（${item.id}）${item.note || ''}`)
+      }
+    }
+    return changed
+  }
+
+  /**
+   * 每拍先看意图，再看 cron。
+   * 意图只说「该醒了」；能不能出声仍由 judgeTiming 五档决定——没过闸就留在 pending，下一拍再看。
+   */
+  async function tickIntents(now) {
+    await loadIntentsOnce()
+    let changed = await pruneIntents(now)
+    const usage = intentUsage(now)
+
+    const due = (intentsDoc.intents ?? [])
+      .filter((item) => item.status === 'pending' && Number.isFinite(Date.parse(item.at)) && Date.parse(item.at) <= now)
+      .sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+
+    for (const item of due) {
+      const sessionId = String(item.sessionId || '')
+      if (!sessionId) {
+        item.status = 'expired'
+        item.closedAt = new Date(now).toISOString()
+        changed = true
+        log(`意图没有会话（${item.id}），作废`)
+        continue
+      }
+
+      if (usage.used >= INTENT_MAX_PER_DAY) {
+        log(`今天的意图唤醒已用满（${usage.used}/${INTENT_MAX_PER_DAY}），${item.id} 先不投`)
+        continue
+      }
+
+      const alarm = state.alarms?.[sessionId]
+      if (alarm?.mutedUntil && Date.parse(alarm.mutedUntil) > now) {
+        log(`静音中，意图先不投（${item.id}）`)
+        continue
+      }
+
+      // 这里曾经有 he-awake（「他 >6 小时没说话就当睡着，不投」），2026-11-26 他去掉了：
+      // 心跳是我自己的时间，不该因为他睡着就不走；只有他正在跟我说话时才往后让一步。
+      // 那个「正在说话」的判断本来就在 decide() 的五道闸里（<5 分钟、等他回、刚收尾）。
+
+      const verdict = await decide(sessionId, now)
+      if (verdict.kind === 'skip') {
+        log(`意图没过闸（${item.id}）：${verdict.reason}`)
+        item.lastSkipAt = new Date(now).toISOString()
+        item.lastSkipReason = verdict.reason
+        changed = true
+        continue
+      }
+
+      const text = `意图唤醒 · 你自己记的「${String(item.note || '').slice(0, LABEL_MAX)}」，到点了。`
+      let result
+      try {
+        result = await deliver(sessionId, text)
+      } catch (error) {
+        result = { ok: false, reason: error?.message || String(error) }
+      }
+      if (!result.ok) {
+        log(`意图投递失败（${item.id}）：${result.reason}`)
+        continue
+      }
+      item.status = 'done'
+      item.deliveredAt = new Date(now).toISOString()
+      intentsDoc.usage = { date: usage.day, count: usage.used + 1 }
+      usage.used += 1
+      changed = true
+      log(`意图唤醒了一次（${item.id}，今天 ${usage.used}/${INTENT_MAX_PER_DAY}）`)
+    }
+
+    if (changed) await saveIntents(intentsDoc)
+    return changed
+  }
+
+  /** 把 intents 里还有 pending 的最近一条算进下一次唤醒时刻 */
+  function nextIntentAt(now = Date.now()) {
+    let earliest = Infinity
+    for (const item of intentsDoc.intents ?? []) {
+      if (item.status !== 'pending') continue
+      const at = Date.parse(item.at)
+      if (!Number.isFinite(at)) continue
+      // 已经到点却没投出去的：第一次立刻处理（该作废的作废、该投的投）；
+      // 处理过还留着的（在等他回、刚收尾、静音…）下一分钟再看，别空转。
+      const candidate = at <= now ? (item.lastSkipAt ? now + MINUTE : now) : at
+      if (candidate < earliest) earliest = candidate
+    }
+    return earliest
+  }
+
 
   function clearTimer() {
     if (timer !== undefined) {
@@ -416,7 +721,7 @@ export function apply(ctx, rawConfig = {}) {
   function scheduleTick() {
     clearTimer()
     if (disposed) return
-    let earliest = Infinity
+    let earliest = nextIntentAt()
     for (const alarm of Object.values(state.alarms ?? {})) {
       if (alarm.enabled === false) continue
       const at = Number(alarm.nextAt)
@@ -439,6 +744,13 @@ export function apply(ctx, rawConfig = {}) {
       await ready
       const now = Date.now()
       let changed = false
+
+      // 意图先走：到点了、且过得了「他这会儿在不在」的闸，就投一条；没过闸留 pending 等下一拍。
+      try {
+        if (await tickIntents(now)) changed = true
+      } catch (error) {
+        log(`意图处理失败：${error?.message || error}`)
+      }
 
       for (const [sessionId, alarm] of Object.entries({ ...(state.alarms ?? {}) })) {
         state.alarms[sessionId] = normaliseAlarm(alarm, cfg, now)
@@ -541,6 +853,11 @@ export function apply(ctx, rawConfig = {}) {
   async function boot() {
     await ready
     await bootState()
+    await loadIntentsOnce()
+    if (disposed) return
+    // 别人的机器上没有这两份本子：只在缺的时候放空模板，一个字都不覆盖。
+    const written = await ensureTemplates(log)
+    if (written.length > 0) log(`首次运行，放了两份空模板（${written.join('、')}）`)
     if (disposed) return
     const now = Date.now()
     for (const alarm of Object.values(state.alarms ?? {})) recompute(alarm, now)
@@ -548,7 +865,8 @@ export function apply(ctx, rawConfig = {}) {
     await saveState(state)
     scheduleTick()
     const count = Object.keys(state.alarms ?? {}).length
-    log(`起来了，${count} 个闹钟，默认时段 ${String(cfg.windowStart).padStart(2, '0')}–${String(cfg.windowEnd).padStart(2, '0')}，预算 ${cfg.dailyBudget}/天`)
+    const pending = (intentsDoc.intents ?? []).filter((item) => item.status === 'pending').length
+    log(`起来了，${count} 个闹钟，${pending} 条待醒的意图，默认时段 ${String(cfg.windowStart).padStart(2, '0')}–${String(cfg.windowEnd).padStart(2, '0')}，预算 ${cfg.dailyBudget}/天`)
   }
 
   ctx.effect(() => {
@@ -726,18 +1044,21 @@ export function apply(ctx, rawConfig = {}) {
           delete alarm.cronParsed
         }
 
-        const next = recompute(alarm, now)
+        // 存盘与回执都用走过 normalise 的那份：裸对象没有 windowStart/windowEnd/dailyBudget，
+        // alarmView 读到 undefined 会让工具输出过不了 lossless JSON 校验（0.3.11 的 bug）。
+        const normalised = normaliseAlarm(alarm, cfg, now)
+        const next = recompute(normalised, now)
         if (!Number.isFinite(next)) {
           return { ok: false, error: 'no_next', message: '这个规则算不出下一次，换一个。' }
         }
-        state.alarms[key.id] = alarm
+        state.alarms[key.id] = normalised
         await saveState(state)
         scheduleTick()
         const used = currentUsage(key.id)
         return {
           ok: true,
-          ...alarmView(alarm, now, cfg, used.used),
-          remainingToday: Math.max(0, alarm.dailyBudget - used.used),
+          ...alarmView(normalised, now, cfg, used.used),
+          remainingToday: Math.max(0, normalised.dailyBudget - used.used),
         }
       },
     }),
@@ -844,6 +1165,109 @@ export function apply(ctx, rawConfig = {}) {
           budget: { used: totalUsed, limit: cfg.dailyBudget, remaining: Math.max(0, cfg.dailyBudget - totalUsed) },
           alarms,
         }
+      },
+    }),
+  )
+
+  ctx.effect(() =>
+    ctx.tools.register({
+      name: 'intent_set',
+      description:
+        '给「我该在什么时候醒」记一条——不是闹钟，是一个念头：到点了，先看你有没有在说话，合适才出声。'
+        + 'at 可以是 ISO 时间、今天的 "HH:MM"、或相对 "+3h" / "+90m"。'
+        + '最多同时挂 5 条，一天最多被这样叫醒 4 次。',
+      parameters: {
+        at: { type: 'string', description: '什么时候该醒：ISO 时间、HH:MM 或 +3h / +90m。' },
+        note: { type: 'string', description: '一句来源：他说的原话，或者你自己的判断。会出现在唤醒里。' },
+      },
+      output: output({ type: 'object', properties: {}, additionalProperties: true }),
+      async execute(args, exec) {
+        await ready
+        await loadIntentsOnce()
+        const key = sessionKeyOf(exec)
+        if (!key) return { ok: false, error: 'no_caller', message: '拿不到当前会话。' }
+        if (key.subagent) return CALLER()
+
+        const when = parseIntentAt(args?.at, Date.now())
+        if (!when.ok) return { ok: false, error: 'invalid_at', message: when.message }
+
+        await pruneIntents(Date.now())
+        const pending = (intentsDoc.intents ?? []).filter((item) => item.status === 'pending')
+        if (pending.length >= INTENT_MAX_PENDING) {
+          return {
+            ok: false,
+            error: 'too_many_intents',
+            message: `同时最多挂 ${INTENT_MAX_PENDING} 条意图，先取消一条再来。`,
+            pending: pending.map((item) => ({ id: item.id, at: item.at, note: item.note })),
+          }
+        }
+
+        const now = Date.now()
+        const item = {
+          id: randomUUID(),
+          at: new Date(when.at).toISOString(),
+          note: String(args?.note ?? '').trim().slice(0, LABEL_MAX * 2),
+          status: 'pending',
+          sessionId: key.id,
+          createdAt: new Date(now).toISOString(),
+        }
+        intentsDoc.intents.push(item)
+        await saveIntents(intentsDoc)
+        scheduleTick()
+        return { ok: true, ...intentView(item, now), pending: pending.length + 1 }
+      },
+    }),
+  )
+
+  ctx.effect(() =>
+    ctx.tools.register({
+      name: 'intent_list',
+      description: '看现在挂着哪些「该醒的念头」：什么时候、为什么、还差多少条到上限。',
+      parameters: {},
+      output: output({ type: 'object', properties: {}, additionalProperties: true }),
+      async execute() {
+        await ready
+        await loadIntentsOnce()
+        const now = Date.now()
+        const pending = (intentsDoc.intents ?? [])
+          .filter((item) => item.status === 'pending')
+          .sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+        const usage = intentUsage(now)
+        return {
+          ok: true,
+          now: new Date(now).toISOString(),
+          nowLocal: `${dayKey(now)} ${hhmm(now)}`,
+          pending: pending.map((item) => intentView(item, now)),
+          limit: { pending: INTENT_MAX_PENDING, perDay: INTENT_MAX_PER_DAY },
+          usedToday: usage.used,
+        }
+      },
+    }),
+  )
+
+  ctx.effect(() =>
+    ctx.tools.register({
+      name: 'intent_cancel',
+      description: '取消一条挂着的意图（改主意了、或他已经说过那件事了）。',
+      parameters: {
+        id: { type: 'string', description: '意图 id，从 intent_list 拿。' },
+      },
+      output: output({ type: 'object', properties: {}, additionalProperties: true }),
+      async execute(args) {
+        await ready
+        await loadIntentsOnce()
+        const id = String(args?.id ?? '').trim()
+        if (!id) return { ok: false, error: 'invalid_id', message: '要给 id。' }
+        const item = (intentsDoc.intents ?? []).find((entry) => entry.id === id)
+        if (!item) return { ok: false, error: 'not_found', message: `没有这条意图：${id}` }
+        if (item.status !== 'pending') {
+          return { ok: false, error: 'not_pending', message: `这条已经是 ${item.status}，不用取消。` }
+        }
+        item.status = 'cancelled'
+        item.closedAt = new Date().toISOString()
+        await saveIntents(intentsDoc)
+        scheduleTick()
+        return { ok: true, cancelled: true, id }
       },
     }),
   )
@@ -972,6 +1396,7 @@ export function apply(ctx, rawConfig = {}) {
 
   if (ctx.webServer?.register) ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: '/dsh-heartbeat.json',
       async handler(req, res) {
@@ -1006,6 +1431,7 @@ export function apply(ctx, rawConfig = {}) {
 
   if (ctx.webServer?.register) ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: '/dsh-heartbeat',
       async handler(_req, res) {
@@ -1017,6 +1443,7 @@ export function apply(ctx, rawConfig = {}) {
 
   if (ctx.webServer?.register) ctx.effect(() =>
     ctx.webServer.register({
+      auth: sameSiteAuth,
       kind: 'exact',
       path: '/dsh-heartbeat/config',
       async handler(req, res) {
