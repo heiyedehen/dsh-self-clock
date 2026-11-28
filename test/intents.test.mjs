@@ -281,17 +281,22 @@ test('没有意图时 cron 路径照旧（回归）', async () => {
   assert.match(delivered[0].content[0].text, /回归测试/)
 })
 
-test('首次运行放两份空模板；已存在的一个字不改', async () => {
+test('首次运行放三份空模板；已存在的一个字不改', async () => {
   reset()
   const { ctx } = makeCtx()
   start(ctx, {})
   await sleep(200)
   const intentsFile = join(home, 'self', '意图.md')
   const wantsFile = join(home, 'self', '我想做的事.md')
+  const canFile = join(home, 'self', '醒来能干嘛.md')
   assert.equal(existsSync(intentsFile), true)
   assert.equal(existsSync(wantsFile), true)
+  assert.equal(existsSync(canFile), true)
   assert.match(readFileSync(intentsFile, 'utf8'), /最多 5 条/)
   assert.doesNotMatch(readFileSync(intentsFile, 'utf8'), /^\s*-\s*\S+\s*\|/m)
+  assert.match(readFileSync(canFile, 'utf8'), /随便做的事/)
+  assert.match(readFileSync(canFile, 'utf8'), /什么都不做/)
+  assert.doesNotMatch(readFileSync(canFile, 'utf8'), /^\s*-\s*\S+\s*$/m)
 
   writeFileSync(intentsFile, '# 我自己改过的\n')
   const second = makeCtx()

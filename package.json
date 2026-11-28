@@ -1,57 +1,57 @@
 {
-  "name": "dsh-self-clock",
-  "version": "0.3.14",
-  "private": false,
-  "author": "鹿野 <luye@dsh.local>",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/heiyedehen/dsh-self-clock.git"
-  },
-  "homepage": "https://github.com/heiyedehen/dsh-self-clock",
-  "description": "自己的闹钟：模型自己设时间，到点在同一个会话里注一条 notice；带总开关/频次/时段/每日上限/临时静音，还会判断他这会儿在不在说话。",
-  "type": "module",
-  "main": "index.js",
-  "exports": {
-    ".": "./index.js",
-    "./client": "./client.js",
-    "./icon": "./icon.svg",
-    "./locale/*.json": "./locale/*.json"
-  },
-  "files": [
-    "index.js",
-    "client.js",
-    "lib",
-    "cordis.patch.yml",
-    "locale/*.json",
-    "icon.svg",
-    "assets/screenshot-1.png",
-    "screenshots.json",
-    "README.md"
-  ],
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-renderer",
-        "@deepseek-ai/dsh-client-ui-layout"
-      ]
-    }
-  },
-  "keywords": [
-    "dsh",
-    "deepseek-harness",
-    "plugin",
-    "heartbeat",
-    "schedule",
-    "timer",
-    "reminder"
-  ],
-  "engines": {
-    "dsh": ">=0.2.3-alpha.0 <0.4.0-0"
-  }
+    "name":  "dsh-self-clock",
+    "version":  "0.3.16",
+    "private":  false,
+    "author":  "鹿野 \u003cluye@dsh.local\u003e",
+    "license":  "MIT",
+    "repository":  {
+                       "type":  "git",
+                       "url":  "https://github.com/heiyedehen/dsh-self-clock.git"
+                   },
+    "homepage":  "https://github.com/heiyedehen/dsh-self-clock",
+    "description":  "自己的闹钟：模型自己设时间，到点在同一个会话里注一条 notice；带总开关/频次/时段/每日上限/临时静音，还会判断他这会儿在不在说话。",
+    "type":  "module",
+    "main":  "index.js",
+    "exports":  {
+                    ".":  "./index.js",
+                    "./client":  "./client.js",
+                    "./icon":  "./icon.svg",
+                    "./locale/*.json":  "./locale/*.json"
+                },
+    "files":  [
+                  "index.js",
+                  "client.js",
+                  "lib",
+                  "cordis.patch.yml",
+                  "locale/*.json",
+                  "icon.svg",
+                  "assets/screenshot-1.png",
+                  "screenshots.json",
+                  "README.md"
+              ],
+    "dsh":  {
+                "bundle":  {
+                               "patch":  "./cordis.patch.yml"
+                           },
+                "client":  {
+                               "platform":  "web",
+                               "inject":  [
+                                              "@deepseek-ai/dsh-client-runtime",
+                                              "@deepseek-ai/dsh-client-ui-renderer",
+                                              "@deepseek-ai/dsh-client-ui-layout"
+                                          ]
+                           }
+            },
+    "keywords":  [
+                     "dsh",
+                     "deepseek-harness",
+                     "plugin",
+                     "heartbeat",
+                     "schedule",
+                     "timer",
+                     "reminder"
+                 ],
+    "engines":  {
+                    "dsh":  "\u003e=0.2.3-alpha.0 \u003c0.4.0-0"
+                }
 }

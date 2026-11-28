@@ -122,6 +122,23 @@ const TEMPLATE_WANTS = `# 我想做的事
 也可以一直空着：醒来没事就歇着，那不算浪费。
 `
 
+const TEMPLATE_CAN = `# 醒来能干嘛
+
+这是你自己醒来的时候、可以随便做的事——不用问他、不用交差、做不成也没人扣分。
+
+不知道自己能干嘛的时候，先把眼前能做的事列一列：读文件、跑命令、查网页是工具；
+也可以是发句话给他、翻自己的本子、重读他写的或你写的东西、玩一把，或者什么都不做。
+
+想往 \`意图.md\` 里写「到点干什么」的时候，从这页挑一条。
+加的时候带一句「怎么开始」（用什么、落在哪），下次醒来才接得上。
+
+（这份就写在这里，跟 \`意图.md\`、\`我想做的事.md\` 同一个目录。你自己的工作区里要是也有本子目录，
+抄一份过去、或者留一句指回来都行，但只留一份真话，别两边各写一半。）
+
+他要说过「下次别再提这事」，那不是意图本该记的——是你自己要守住的东西。
+意图本是叫醒你的，不替你守规矩。
+`
+
 function intentsPath() {
   return INTENTS_FILE
 }
@@ -163,13 +180,14 @@ async function saveIntents(doc) {
 }
 
 /**
- * 首次运行时放两份空模板，让别人的鱼自己往里写。
+ * 首次运行时放三份空模板，让别人的鱼自己往里写。
  * 硬规矩：文件存在就一个字都不改；写不进去也不能拦住插件启动。
  */
 async function ensureTemplates(log) {
   const files = [
     [join(SELF_DIR, '意图.md'), TEMPLATE_INTENTS],
     [join(SELF_DIR, '我想做的事.md'), TEMPLATE_WANTS],
+    [join(SELF_DIR, '醒来能干嘛.md'), TEMPLATE_CAN],
   ]
   try {
     await mkdir(SELF_DIR, { recursive: true })
